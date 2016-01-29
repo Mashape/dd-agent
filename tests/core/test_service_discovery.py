@@ -5,7 +5,9 @@ import mock
 import unittest
 
 # project
-from utils.service_discovery.config_stores import ConfigStore, EtcdStore, ConsulStore
+from utils.service_discovery.config_stores import ConfigStore
+from utils.service_discovery.consul_config_store import ConsulStore
+from utils.service_discovery.etcd_config_store import EtcdStore
 from utils.service_discovery.sd_backend import ServiceDiscoveryBackend, SDDockerBackend
 
 
@@ -82,16 +84,16 @@ class TestServiceDiscovery(unittest.TestCase):
     ]
 
     mock_templates = {
-        # image_name: ([check_name, init_tpl, instance_tpl, variables], (expected_config_template))
-        'image_0': (['check_0', {}, {'host': '%%host%%'}, ['host']], ('check_0', {}, {'host': '127.0.0.1'})),
-        'image_1': (['check_1', {}, {'port': '%%port%%'}, ['port']], ('check_1', {}, {'port': '1337'})),
+        # image_name: ((check_name, init_tpl, instance_tpl, variables), (expected_config_template))
+        'image_0': (('check_0', {}, {'host': '%%host%%'}, ['host']), ('check_0', {}, {'host': '127.0.0.1'})),
+        'image_1': (('check_1', {}, {'port': '%%port%%'}, ['port']), ('check_1', {}, {'port': '1337'})),
         'image_2': (
-            ['check_2', {}, {'host': '%%host%%', 'port': '%%port%%'}, ['host', 'port']],
+            ('check_2', {}, {'host': '%%host%%', 'port': '%%port%%'}, ['host', 'port']),
             ('check_2', {}, {'host': '127.0.0.1', 'port': '1337'})),
     }
 
     bad_mock_templates = {
-        'bad_image_0': ['invalid template'],
+        'bad_image_0': ('invalid template'),
         'bad_image_1': None
     }
 
@@ -193,9 +195,9 @@ class TestServiceDiscovery(unittest.TestCase):
     def test_get_auto_config(self):
         """Test _get_auto_config"""
         expected_tpl = {
-            'redis': ['redisdb', '{}', '{"host": "%%host%%", "port": "%%port%%"}'],
-            'nginx': ['nginx', '{}', '{"nginx_status_url": "http://%%host%%/nginx_status/"}'],
-            'consul': ['consul', '{}', '{"url": "http://%%host%%:%%port%%", "catalog_checks": true, "service_whitelist": null, "new_leader_checks": true}'],
+            'redis': ('redisdb', '{}', '{"host": "%%host%%", "port": "%%port%%"}'),
+            'nginx': ('nginx', '{}', '{"nginx_status_url": "http://%%host%%/nginx_status/"}'),
+            'consul': ('consul', '{}', '{"url": "http://%%host%%:%%port%%", "catalog_checks": true, "service_whitelist": null, "new_leader_checks": true}'),
             'foobar': None
         }
         config_store = ConfigStore(self.auto_conf_agentConfig)

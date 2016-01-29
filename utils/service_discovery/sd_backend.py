@@ -78,6 +78,7 @@ class SDDockerBackend(ServiceDiscoveryBackend):
         self.VAR_MAPPING = {
             'host': self._get_host,
             'port': self._get_port,
+            'tags': self._get_tags,
         }
         ServiceDiscoveryBackend.__init__(self, agentConfig)
 
@@ -88,17 +89,10 @@ class SDDockerBackend(ServiceDiscoveryBackend):
             log.debug("Didn't find the IP address for container %s (%s), using the kubernetes way." %
                       (container_inspect.get('Id', ''), container_inspect.get('Config', {}).get('Image', '')))
             # kubernetes case
-            host_ip = _get_default_router()
-
-            # query the pod list for this node from kubelet
-            config_file_path = get_conf_path(KUBERNETES_CHECK_NAME)
-            check_config = check_yaml(config_file_path)
-            instances = check_config.get('instances', [{}])
-            kube_port = instances[0].get('kubelet_port', DEFAULT_KUBELET_PORT)
-            pod_list = requests.get('http://%s:%s/pods' % (host_ip, kube_port)).json()
-
+            pod_list = self._get_pod_list()
             c_id = container_inspect.get('Id')
-            for pod in pod_list.get('items', []):
+
+            for pod in pod_list:
                 pod_ip = pod.get('status', {}).get('podIP')
                 if pod_ip is None:
                     continue
@@ -122,6 +116,57 @@ class SDDockerBackend(ServiceDiscoveryBackend):
             ports = container_inspect['Config'].get('ExposedPorts', {})
             port = ports.keys()[0].split("/")[0] if ports else None
         return port
+
+    def _get_tags(self, container_inspect):
+        """Extract useful tags from docker or platform APIs."""
+        tags = []
+        tag_dict = {
+            'replication_controller': None,
+            'namespace': None,
+            'pod_name': None,
+            'node_name': None,
+        }
+        pod_metadata = self._get_kube_config(container_inspect.get('Id'), 'metadata')
+        pod_spec = self._get_kube_config(container_inspect.get('Id'), 'spec')
+
+        # get labels
+        kube_labels = pod_metadata.get('labels', {})
+        for tag, value in kube_labels.iteritems():
+            tags.append('%s:%s' % (tag, value))
+
+        # get replication controller
+        created_by = json.loads(pod_metadata.get('annotations', {}).get('kubernetes.io/created-by', '{}'))
+        if created_by.get('kind') == 'ReplicationController':
+            tag_dict['replication_controller'] = created_by.get('name')
+
+        tag_dict['namespace'] = pod_metadata.get('namespace')
+        tag_dict['pod_name'] = pod_metadata.get('name')
+        tag_dict['node_name'] = pod_spec.get('nodeName')
+
+        for tag, value in tag_dict.iteritems():
+            if value is not None:
+                tags.append('%s:%s' % (tag, value))
+
+        return tags
+
+    def _get_kube_config(self, c_id, key):
+        """Get a part of a pod config from the kubernetes API"""
+        pods = self._get_pod_list()
+        for pod in pods:
+            c_statuses = pod.get('status', {}).get('containerStatuses', [])
+            for status in c_statuses:
+                if c_id == status.get('containerID', '').split('//')[1]:
+                    return pod.get(key, {})
+
+    def _get_pod_list(self):
+        """Query the pod list from the kubernetes API and returns it as a list"""
+        host_ip = _get_default_router()
+        config_file_path = get_conf_path(KUBERNETES_CHECK_NAME)
+        check_config = check_yaml(config_file_path)
+        instances = check_config.get('instances', [{}])
+        kube_port = instances[0].get('kubelet_port', DEFAULT_KUBELET_PORT)
+        pod_list = requests.get('http://%s:%s/pods' % (host_ip, kube_port)).json()
+        return pod_list.get('items', [])
 
     def get_configs(self):
         """Get the config for all docker containers running on the host."""
@@ -156,11 +201,12 @@ class SDDockerBackend(ServiceDiscoveryBackend):
         var_values = {}
         for v in variables:
             if v in self.VAR_MAPPING:
-                var_values[v] = self.VAR_MAPPING[v](inspect)
+                try:
+                    var_values[v] = self.VAR_MAPPING[v](inspect)
+                except Exception as ex:
+                    log.error("Could not find a value for the template variable %s: %s", (v, ex))
             else:
-                log.debug("Didn't find any way to extract the value for %s, "
-                          "looking in env variables/docker labels..." % v)
-                var_values[v] = self._get_explicit_variable(inspect, v)
+                log.error("No method was found to interpolate template variable %s." % v)
         init_config, instances = self._render_template(init_config_tpl or {}, instance_tpl or {}, var_values)
         return (check_name, init_config, instances)
 
@@ -193,26 +239,4 @@ class SDDockerBackend(ServiceDiscoveryBackend):
             log.error('Failed to decode the JSON template fetched from {0}.'
                       'Auto-config for {1} failed.'.format(config_backend, image_name))
             return None
-        return [check_name, init_config_tpl, instance_tpl, variables]
-
-    def _get_explicit_variable(self, container_inspect, var):
-        """Extract the value of a config variable from env variables or docker labels.
-           Return None if the variable is not found."""
-        conf = self._get_config_space(container_inspect['Config'])
-        if conf is not None:
-            return conf.get(var)
-
-    def _get_config_space(self, container_conf):
-        """Check whether the user config was provided through env variables or container labels.
-           Return this config after removing its `datadog_` prefix."""
-        env_variables = {v.split("=")[0].split("datadog_")[1]: v.split("=")[1]
-                         for v in container_conf['Env'] if v.split("=")[0].startswith("datadog_")}
-        labels = {k.split('datadog_')[1]: v
-                  for k, v in container_conf['Labels'].iteritems() if k.startswith("datadog_")}
-
-        if "check_name" in env_variables:
-            return env_variables
-        elif 'check_name' in labels:
-            return labels
-        else:
-            return None
+        return (check_name, init_config_tpl, instance_tpl, variables)

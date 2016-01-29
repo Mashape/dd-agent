@@ -4,9 +4,6 @@ import simplejson as json
 from os import path
 
 # 3p
-from consul import Consul
-from etcd import EtcdKeyNotFound
-from etcd import Client as etcd_client
 from urllib3.exceptions import TimeoutError
 
 # project
@@ -15,20 +12,7 @@ from utils.checkfiles import get_check_class, get_auto_conf
 
 log = logging.getLogger(__name__)
 
-DEFAULT_ETCD_HOST = '127.0.0.1'
-DEFAULT_ETCD_PORT = 4001
-DEFAULT_ETCD_PROTOCOL = 'http'
-DEFAULT_RECO = True
-DEFAULT_TIMEOUT = 5
 SD_TEMPLATE_DIR = '/datadog/check_configs'
-
-DEFAULT_CONSUL_HOST = '127.0.0.1'
-DEFAULT_CONSUL_PORT = 8500
-DEFAULT_CONSUL_TOKEN = None
-DEFAULT_CONSUL_SCHEME = 'http'
-DEFAULT_CONSUL_CONSISTENCY = 'default'
-DEFAULT_CONSUL_DATACENTER = None
-DEFAULT_CONSUL_VERIFY = True
 
 AUTO_CONF_IMAGES = {
     # image_name: check_name
@@ -49,6 +33,8 @@ class ConfigStore(object):
     previous_config_index = None
 
     def __new__(cls, *args, **kwargs):
+        from utils.service_discovery.etcd_config_store import EtcdStore
+        from utils.service_discovery.consul_config_store import ConsulStore
         if cls._instance is None:
             agentConfig = kwargs.get('agentConfig', {})
             if agentConfig.get('sd_config_backend') == 'etcd':
@@ -96,7 +82,7 @@ class ConfigStore(object):
                 init_config_tpl = json.dumps(init_config) if init_config else '{}'
                 instance_tpl = json.dumps(instances[0]) if instances and len(instances) > 0 else '{}'
 
-                return [check_name, init_config_tpl, instance_tpl]
+                return (check_name, init_config_tpl, instance_tpl)
         return None
 
     def get_check_tpl(self, image, **kwargs):
@@ -126,11 +112,11 @@ class ConfigStore(object):
                     log.debug('No auto config was found for image %s, leaving it alone.' % image)
                     return None
             except Exception:
-                log.info(
+                log.warning(
                     'Fetching the value for {0} in the config store failed, '
                     'this check will not be configured by the service discovery.'.format(image))
                 return None
-        template = [check_name, init_config_tpl, instance_tpl]
+        template = (check_name, init_config_tpl, instance_tpl)
         return template
 
     def crawl_config_template(self):
@@ -180,83 +166,3 @@ class StubStore(ConfigStore):
     def crawl_config_template(self):
         # There is no user provided templates in auto_config mode
         return False
-
-
-class EtcdStore(ConfigStore):
-    """Implementation of a config store client for etcd"""
-    def _extract_settings(self, config):
-        """Extract settings from a config object"""
-        settings = {
-            'host': config.get('sd_backend_host', DEFAULT_ETCD_HOST),
-            'port': int(config.get('sd_backend_port', DEFAULT_ETCD_PORT)),
-            # these two are always set to their default value for now
-            'allow_reconnect': config.get('etcd_allow_reconnect', DEFAULT_RECO),
-            'protocol': config.get('etcd_protocol', DEFAULT_ETCD_PROTOCOL),
-        }
-        return settings
-
-    def get_client(self, reset=False):
-        if self.client is None or reset is True:
-            self.client = etcd_client(
-                host=self.settings.get('host'),
-                port=self.settings.get('port'),
-                allow_reconnect=self.settings.get('allow_reconnect'),
-                protocol=self.settings.get('protocol'),
-            )
-        return self.client
-
-    def client_read(self, path, **kwargs):
-        """Retrieve a value from a etcd key."""
-        try:
-            res = self.client.read(
-                path,
-                timeout=kwargs.get('timeout', DEFAULT_TIMEOUT),
-                recursive=kwargs.get('recursive', False))
-            if kwargs.get('watch', False) is True:
-                return res.etcd_index
-            else:
-                return res.value
-        except EtcdKeyNotFound:
-            raise KeyNotFound("The key %s was not found in etcd" % path)
-        except TimeoutError, e:
-            raise e
-
-
-class ConsulStore(ConfigStore):
-    """Implementation of a config store client for consul"""
-    def _extract_settings(self, config):
-        """Extract settings from a config object"""
-        settings = {
-            'host': config.get('sd_backend_host', DEFAULT_CONSUL_HOST),
-            'port': int(config.get('sd_backend_port', DEFAULT_CONSUL_PORT)),
-            # all these are set to their default value for now
-            'token': config.get('consul_token', None),
-            'scheme': config.get('consul_scheme', DEFAULT_CONSUL_SCHEME),
-            'consistency': config.get('consul_consistency', DEFAULT_CONSUL_CONSISTENCY),
-            'verify': config.get('consul_verify', DEFAULT_CONSUL_VERIFY),
-        }
-        return settings
-
-    def get_client(self, reset=False):
-        """Return a consul client, create it if needed"""
-        if self.client is None or reset is True:
-            self.client = Consul(
-                host=self.settings.get('host'),
-                port=self.settings.get('port'),
-                token=self.settings.get('token'),
-                scheme=self.settings.get('scheme'),
-                consistency=self.settings.get('consistency'),
-                verify=self.settings.get('verify'),
-            )
-        return self.client
-
-    def client_read(self, path, **kwargs):
-        """Retrieve a value from a consul key."""
-        res = self.client.kv.get(path)
-        if kwargs.get('watch', False) is True:
-            return res[0]
-        else:
-            if res[1] is not None:
-                return res[1].get('Value', recurse=kwargs.get('recursive', False))
-            else:
-                raise KeyNotFound("The key %s was not found in consul" % path)
